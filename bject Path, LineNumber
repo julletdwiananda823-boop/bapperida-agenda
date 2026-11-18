@@ -1,0 +1,15 @@
+warning: in the working copy of 'app/Exports/AgendaMonthSheet.php', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'app/Http/Controllers/AgendaController.php', CRLF will be replaced by LF the next time Git touches it
+.gitignore:70: new blank line at EOF.
+resources/views/welcome.blade.php:27: trailing whitespace.
+[32m+[m[41m   [m
+resources/views/welcome.blade.php:2257: trailing whitespace.
+[32m+[m[32m        function closeLoginModal() {[m[41m [m
+resources/views/welcome.blade.php:3349: trailing whitespace.
+[32m+[m[41m            [m
+resources/views/welcome.blade.php:3357: trailing whitespace.
+[32m+[m[41m            [m
+resources/views/welcome.blade.php:3361: trailing whitespace.
+[32m+[m[41m            [m
+resources/views/welcome.blade.php:3801: trailing whitespace.
+[32m+[m[41m            [m

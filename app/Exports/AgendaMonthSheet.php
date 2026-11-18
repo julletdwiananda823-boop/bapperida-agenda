@@ -81,6 +81,7 @@ class AgendaMonthSheet implements
 
         return $query
             ->orderBy('tanggal_kegiatan')
+            ->orderBy('jam_mulai')
             ->orderBy('id')
             ->get();
     }
@@ -127,6 +128,11 @@ class AgendaMonthSheet implements
         ];
     }
 
+    /**
+     * Mengubah data agenda menjadi baris Excel.
+     * Mengutamakan jam_mulai dan jam_selesai.
+     * Kolom waktu lama tetap menjadi cadangan.
+     */
     public function map($agenda): array
     {
         $tanggal = date('Y-m-d', strtotime($agenda->tanggal_kegiatan));
@@ -156,11 +162,25 @@ class AgendaMonthSheet implements
             . ' ' . ($namaBulan[(int) date('n', strtotime($tanggal))] ?? '')
             . ' ' . date('Y', strtotime($tanggal));
 
+        // Format waktu dari kolom TIME yang baru.
+        if (
+            !empty($agenda->jam_mulai)
+            && !empty($agenda->jam_selesai)
+        ) {
+            $waktuAgenda = substr((string) $agenda->jam_mulai, 0, 5)
+                . ' - '
+                . substr((string) $agenda->jam_selesai, 0, 5)
+                . ' WIB';
+        } else {
+            // Cadangan untuk data lama.
+            $waktuAgenda = $agenda->waktu ?? '';
+        }
+
         return [
             $tanggalBaru ? $this->nomor : '',
             $tanggalBaru ? $tanggalIndonesia : '',
             $tanggalBaru ? ($agenda->hari ?? '') : '',
-            $agenda->waktu ?? '',
+            $waktuAgenda,
             $agenda->ruang ?? '',
             $agenda->acara ?? '',
             $agenda->bidang ?? '',

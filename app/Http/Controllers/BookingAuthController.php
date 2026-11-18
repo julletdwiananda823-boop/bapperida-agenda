@@ -22,7 +22,6 @@ class BookingAuthController extends Controller
             'nama' => ['required', 'string', 'max:150'],
         ]);
 
-        // Batasi percobaan login berdasarkan IP.
         $key = 'booking-login:' . Str::lower(
             (string) $request->ip()
         );
@@ -35,8 +34,7 @@ class BookingAuthController extends Controller
             ], 429);
         }
 
-        // PIN disimpan pada file .env, bukan langsung di kode.
-        $pinBenar = (string) env('BAPPERIDA_BOOKING_PIN', '');
+        $pinBenar = (string) config('services.bapperida_booking_pin', '');
 
         if (
             $pinBenar === '' ||
@@ -49,10 +47,8 @@ class BookingAuthController extends Controller
             ], 422);
         }
 
-        // Hapus hitungan percobaan setelah login berhasil.
         RateLimiter::clear($key);
 
-        // Regenerasi session untuk membantu mencegah session fixation.
         $request->session()->regenerate();
 
         $request->session()->put([
@@ -69,13 +65,18 @@ class BookingAuthController extends Controller
     }
 
     /**
-     * Logout booking dan invalidasi session.
+     * Logout Booking tanpa mengeluarkan akun Admin.
      */
     public function logout(Request $request)
     {
-        $request->session()->invalidate();
+        // Hapus sesi Booking saja.
+        $request->session()->forget([
+            'booking_authenticated',
+            'booking_pemesan',
+            'booking_owner_token',
+        ]);
 
-        // Buat token CSRF baru setelah session diinvalidasi.
+        // Perbarui token CSRF tanpa menghapus sesi Admin.
         $request->session()->regenerateToken();
 
         return response()->json([

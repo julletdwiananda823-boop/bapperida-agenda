@@ -16,10 +16,15 @@ class RoomBookingController extends Controller
     ];
 
     /**
-     * Pastikan pengguna sudah login melalui PIN booking.
+     * Pastikan pengguna sudah login melalui PIN booking atau merupakan Admin/Pimpinan aktif.
      */
     private function ensureBookingLogin(Request $request): void
     {
+        $user = $request->user();
+        if ($user && in_array($user->role, ['admin', 'pimpinan'], true) && $user->is_active) {
+            return;
+        }
+
         abort_unless(
             $request->session()->get('booking_authenticated') === true
             && is_string($request->session()->get('booking_pemesan'))
@@ -30,12 +35,31 @@ class RoomBookingController extends Controller
     }
 
     /**
-     * Tampilkan jadwal booking.
-     * Token kepemilikan tidak pernah dikirim ke browser.
+     * Ubah format jam HH:mm atau HH:mm:ss menjadi menit.
      */
-    public function index()
+    private function parseTime(string $time): ?int
     {
-        $bookings = RoomBooking::query()
+        if (!preg_match('/^(\d{2}):(\d{2})(?::\d{2})?$/', trim($time), $m)) {
+            return null;
+        }
+
+        $hour = (int) $m[1];
+        $minute = (int) $m[2];
+
+        if ($hour > 23 || $minute > 59) {
+            return null;
+        }
+
+        return ($hour * 60) + $minute;
+    }
+
+    /**
+     * Tampilkan jadwal booking.
+     * Token kepemilikan tidak dikirim ke browser.
+     */
+    public function index(Request $request)
+    {
+        $query = RoomBooking::query()
             ->select([
                 'id',
                 'ruang',
@@ -44,8 +68,15 @@ class RoomBookingController extends Controller
                 'jam_selesai',
                 'acara',
                 'pemesan',
-            ])
-            ->whereDate('tanggal', '>=', now()->toDateString())
+            ]);
+
+        if ($request->filled('tanggal')) {
+            $query->whereDate('tanggal', $request->query('tanggal'));
+        } else {
+            $query->whereDate('tanggal', '>=', now()->subDays(7)->toDateString());
+        }
+
+        $bookings = $query
             ->orderBy('tanggal')
             ->orderBy('jam_mulai')
             ->get();
@@ -54,25 +85,49 @@ class RoomBookingController extends Controller
     }
 
     /**
-     * Simpan booking baru dan cegah bentrok waktu.
+     * Simpan booking dan cegah bentrok dengan booking maupun agenda.
      */
     public function store(Request $request)
     {
         $this->ensureBookingLogin($request);
 
         $validated = $request->validate([
-            'ruang' => ['required', 'string', 'in:' . implode(',', $this->rooms)],
-            'tanggal' => ['required', 'date_format:Y-m-d', 'after_or_equal:today'],
-            'jam_mulai' => ['required', 'date_format:H:i'],
-            'jam_selesai' => ['required', 'date_format:H:i', 'after:jam_mulai'],
-            'acara' => ['required', 'string', 'max:255'],
+            'ruang' => [
+                'required',
+                'string',
+                'in:' . implode(',', $this->rooms),
+            ],
+            'tanggal' => [
+                'required',
+                'date_format:Y-m-d',
+                'after_or_equal:today',
+            ],
+            'jam_mulai' => [
+                'required',
+                'date_format:H:i',
+            ],
+            'jam_selesai' => [
+                'required',
+                'date_format:H:i',
+                'after:jam_mulai',
+            ],
+            'acara' => [
+                'required',
+                'string',
+                'max:255',
+            ],
         ]);
 
-        $ownerToken = $request->session()->get('booking_owner_token');
-        $pemesan = $request->session()->get('booking_pemesan');
+        $user = $request->user();
+        $isAdminOrPimpinan = $user
+            && in_array($user->role, ['admin', 'pimpinan'], true)
+            && $user->is_active;
 
-        // MySQL advisory lock membuat pemeriksaan bentrok untuk
-        // ruangan dan tanggal yang sama berjalan bergantian.
+        $ownerToken = $request->session()->get('booking_owner_token')
+            ?? ($isAdminOrPimpinan ? bin2hex(random_bytes(32)) : null);
+        $pemesan = $request->session()->get('booking_pemesan')
+            ?? ($isAdminOrPimpinan ? ($user->name ?? 'Admin BAPPERIDA') : null);
+
         $lockName = 'booking_' . sha1(
             $validated['ruang'] . '|' . $validated['tanggal']
         );
@@ -94,19 +149,107 @@ class RoomBookingController extends Controller
                 $ownerToken,
                 $pemesan
             ) {
-                $conflict = RoomBooking::query()
+                $newStart = $this->parseTime($validated['jam_mulai']);
+                $newEnd = $this->parseTime($validated['jam_selesai']);
+
+                if (
+                    $newStart === null ||
+                    $newEnd === null ||
+                    $newEnd <= $newStart
+                ) {
+                    throw ValidationException::withMessages([
+                        'jam_mulai' => ['Format jam booking tidak valid.'],
+                    ]);
+                }
+
+                // Cek bentrok dengan booking lain.
+                $existingBookings = RoomBooking::query()
                     ->where('ruang', $validated['ruang'])
                     ->whereDate('tanggal', $validated['tanggal'])
-                    ->where('jam_mulai', '<', $validated['jam_selesai'])
-                    ->where('jam_selesai', '>', $validated['jam_mulai'])
-                    ->exists();
+                    ->get(['jam_mulai', 'jam_selesai', 'acara']);
 
-                if ($conflict) {
-                    throw ValidationException::withMessages([
-                        'jam_mulai' => [
-                            'Ruangan sudah dibooking pada waktu tersebut. Silakan pilih jam lain.',
-                        ],
+                foreach ($existingBookings as $existing) {
+                    $existingStart = $this->parseTime(
+                        (string) $existing->jam_mulai
+                    );
+
+                    $existingEnd = $this->parseTime(
+                        (string) $existing->jam_selesai
+                    );
+
+                    if ($existingStart === null || $existingEnd === null) {
+                        continue;
+                    }
+
+                    if ($newStart < $existingEnd && $newEnd > $existingStart) {
+                        throw ValidationException::withMessages([
+                            'jam_mulai' => [
+                                'Ruangan sudah dibooking untuk acara '
+                                . $existing->acara . ' pada jam '
+                                . $existing->jam_mulai . '–'
+                                . $existing->jam_selesai . '.',
+                            ],
+                        ]);
+                    }
+                }
+
+                // Cek bentrok dengan agenda.
+                $agendas = DB::table('agendas')
+                    ->whereDate('tanggal_kegiatan', $validated['tanggal'])
+                    ->where('ruang', $validated['ruang'])
+                    ->get([
+                        'jam_mulai',
+                        'jam_selesai',
+                        'waktu',
+                        'acara',
                     ]);
+
+                foreach ($agendas as $agenda) {
+                    $agendaStart = $this->parseTime(
+                        (string) $agenda->jam_mulai
+                    );
+
+                    $agendaEnd = $this->parseTime(
+                        (string) $agenda->jam_selesai
+                    );
+
+                    // Periksa data agenda lama melalui kolom waktu.
+                    if ($agendaStart === null || $agendaEnd === null) {
+                        if (
+                            preg_match(
+                                '/(\d{1,2})[.:](\d{2})\s*-\s*(\d{1,2})[.:](\d{2})/',
+                                (string) $agenda->waktu,
+                                $matches
+                            )
+                        ) {
+                            $agendaStart = ((int) $matches[1] * 60)
+                                + (int) $matches[2];
+
+                            $agendaEnd = ((int) $matches[3] * 60)
+                                + (int) $matches[4];
+                        } else {
+                            continue;
+                        }
+                    }
+
+                    if ($agendaEnd <= $agendaStart) {
+                        continue;
+                    }
+
+                    if ($newStart < $agendaEnd && $newEnd > $agendaStart) {
+                        $waktuAgenda = $agenda->waktu ?: (
+                            substr((string) $agenda->jam_mulai, 0, 5)
+                            . ' - '
+                            . substr((string) $agenda->jam_selesai, 0, 5)
+                        );
+
+                        throw ValidationException::withMessages([
+                            'jam_mulai' => [
+                                'Booking tidak dapat disimpan karena bertabrakan dengan agenda '
+                                . $agenda->acara . ' (' . $waktuAgenda . ').',
+                            ],
+                        ]);
+                    }
                 }
 
                 return RoomBooking::create([
@@ -138,20 +281,27 @@ class RoomBookingController extends Controller
     }
 
     /**
-     * Batalkan booking hanya dari sesi yang membuatnya.
+     * Batalkan booking dari sesi yang membuatnya atau oleh Admin/Pimpinan.
      */
     public function destroy(Request $request, $id)
     {
-        $this->ensureBookingLogin($request);
+        $user = $request->user();
+        $isAdminOrPimpinan = $user
+            && in_array($user->role, ['admin', 'pimpinan'], true)
+            && $user->is_active;
+
+        if (!$isAdminOrPimpinan) {
+            $this->ensureBookingLogin($request);
+        }
 
         $booking = RoomBooking::findOrFail($id);
-        $sessionToken = $request->session()->get('booking_owner_token');
+        $sessionToken = $request->hasSession() ? $request->session()->get('booking_owner_token') : null;
 
-        if (
-            ! is_string($booking->owner_token) ||
-            ! is_string($sessionToken) ||
-            ! hash_equals($booking->owner_token, $sessionToken)
-        ) {
+        $isOwner = is_string($booking->owner_token)
+            && is_string($sessionToken)
+            && hash_equals($booking->owner_token, $sessionToken);
+
+        if (!$isAdminOrPimpinan && !$isOwner) {
             abort(
                 403,
                 'Kamu hanya dapat membatalkan booking dari sesi yang membuatnya.'
